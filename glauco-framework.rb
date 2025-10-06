@@ -61,6 +61,7 @@ module Frontend
       return unless @root_component
       puts "passed root_component condition"
       puts "now will call browser.set_text"
+      puts "HTML content: #{@root_component.render_to_html}"
       @browser.set_text(@root_component.render_to_html)
     end
 
@@ -348,9 +349,38 @@ module Frontend
     end
 
     def render_to_html
-      return "" unless @render_block
-      instance_eval(&@render_block).to_s
+      # Guard principal: verificar se o componente tem um bloco de renderização
+      unless defined?(@render_block) && @render_block.is_a?(Proc)
+        puts "⚠️ [GUARD] Nenhum bloco de renderização definido para #{self.class}. Retornando string vazia."
+        return ""
+      end
+
+      begin
+        # Tentativa de renderização com segurança
+        html = instance_eval(&@render_block)
+        unless html.is_a?(String)
+          puts "⚠️ [GUARD] Resultado inesperado do render_block em #{self.class}: #{html.class}. Convertendo para string."
+          html = html.to_s
+        end
+
+        puts "✅ [DEBUG] Renderização bem-sucedida em #{self.class}: tamanho #{html.length} chars"
+        html
+
+      rescue SyntaxError => e
+        puts "💥 [ERROR] Erro de sintaxe ao renderizar #{self.class}: #{e.message}\n#{e.backtrace.first(3).join("\n")}"
+        "<div class='error'>Erro de sintaxe em #{self.class}</div>"
+
+      rescue NoMethodError => e
+        puts "💥 [ERROR] Método não encontrado em #{self.class}: #{e.message}\n#{e.backtrace.first(3).join("\n")}"
+        "<div class='error'>Método ausente: #{e.name}</div>"
+
+      rescue StandardError => e
+        puts "💥 [ERROR] Exceção geral ao renderizar #{self.class}: #{e.class} - #{e.message}"
+        puts e.backtrace.first(5).join("\n")
+        "<div class='error'>Erro interno em #{self.class}</div>"
+      end
     end
+
 
 
     def define_render(&block)
