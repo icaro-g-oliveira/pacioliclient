@@ -16,3 +16,4 @@ gem "fast-mcp", "~> 1.5"
 gem "mcp", "~> 0.3.0"
 
 gem "observer", "~> 0.1.2"
+

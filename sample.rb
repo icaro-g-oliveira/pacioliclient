@@ -1,331 +1,232 @@
-
-require_relative 'LMSLLM_integration'
 require_relative 'glauco-framework'
 
 include Frontend
-# Counter component example
-class Counter < Component
+include Agents
+
+class BrowserDemo < Component
   def initialize(parent_renderer:)
     super(parent_renderer: parent_renderer)
-    @state[:count] = 0
-
-    define_render do
-      puts "defining render is called at least"
-      div(style: "padding:20px") do
-        span("Count: #{@state[:count]}", id: "count_display") +
-        button(onclick: proc {
-          @state[:count] += 1
-          rerender() # BUG: Has to call render from parent here cause swt binding function crash if trys to set directly
-        }) { "Increment" }
-      end
-    end
+    @state[:conteudo] = "Aguardando..."
+    @automation = WebAutomation.new
   end
-end
-class ParentChildNestedTest < Component
-  def initialize(parent_renderer:)
-    super(parent_renderer: parent_renderer)
 
-    # Estado principal com objeto aninhado
-    @state = {
-      form_type: "A",       # Tipo de formulário (pai)
-      form_data: {          # Objeto aninhado para dados do form
-        child_value: "A"    # Valor interno (filho)
-      }
-    }
-    define_render do
-      # Pai: bind sobre objeto aninhado
-      # --- Bind do formulário pai ---
-      bind(:form_type, div(style: "padding:10px; border:1px solid green; width:400px;")) do |form_type|
-        div("Form type: #{form_type}", style: "font-weight:bold; margin-bottom:10px;") +
+  def render
+    div(style: "padding: 20px; background-color: #222; color: white; font-family: sans-serif;") do
 
-        # Botões para mudar o tipo de formulário (pai)
-        button(onclick: proc { set_state(:form_type, "A") }) { "Form A" } +
-        button(onclick: proc { set_state(:form_type, "B") }) { "Form B" } +
+      h2 { "Demo: WebAutomation" } +
 
-        # Bind interno para child_value
-        bind(:form_data>:child_value, div(style: "margin-top:10px; padding:5px; border:1px solid blue;")) do |child_value|
-          div("Child value: #{child_value}", style: "margin-bottom:5px;") +
+        bind(:conteudo, div(style: "margin-bottom: 15px;")) { |conteudo|
+          "📜 Status: #{conteudo}"
+        } +
 
-          select(
-            onchange: proc { |payload|
-              set_state(:form_data>:child_value, payload[0].to_s)
-            }
-          ) do
-            %w[A B C].map do |val|
-              attrs = {}
-              attrs[:selected] = "selected" if child_value == val
-              option(val, **attrs)
-            end.join
-          end
-        end
-      end
-    end
-  end
-end
-class ChatPage < Component
-  def initialize(parent_renderer:)
-    super(parent_renderer: parent_renderer)
+        # ====== Linha 1: Controle geral ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.open("https://www.google.com")
+            @state[:conteudo] = "Abriu Google"
+          }) { "🌐 Abrir Google" } +
 
-    # Estado inicial: mensagens do chat
-    @state = {
-      logged_in: false,
-      user_name: nil,
-      messages: [
-        {role: "user", text: "Olá"},
-        {role: "ia", text: "Oi!"}
-      ]
-    }
-    input_value = nil
+            button(onclick: proc {
+              @automation.reload
+              @state[:conteudo] = "Recarregou página"
+            }, style: "margin-left: 10px;") { "🔁 Recarregar" } +
 
-    define_render do
-      puts "rendered with state:\n#{@state}"
+            button(onclick: proc {
+              @automation.back
+              @state[:conteudo] = "Voltou"
+            }, style: "margin-left: 10px;") { "⬅️ Voltar" } +
 
-      bind(:logged_in, div(style: "padding:20px; border:1px solid #cc; width:400px; height:500px; display:flex; flex-direction:column;")) do |logged_in|
-        puts "Rendering chat page, logged_in=#{logged_in}"
-        div("Login", style: "font-size:24px; margin-bottom:20px;") +
-        if !logged_in
-          div(style: "margin-bottom:20px;") do
-            input(
-              type: "text",
-              placeholder: "Seu nome",
-              style: "padding:5px; margin-right:10px;",
-              onchange: proc { |payload|
-                puts "onchange payload: #{payload.inspect}"
-                @state[:user_name] = payload[0].to_s # payload do browser é
-              }
-            ) +
-            button(on_click: proc {
-              puts "Login button clicked, user_name=#{@state[:user_name].inspect}"
-              unless @state[:user_name].nil? || @state[:user_name].strip.empty?
-                puts "Setting logged_in to true"
-                set_state(:logged_in, true)
+            button(onclick: proc {
+              @automation.forward
+              @state[:conteudo] = "Avançou"
+            }, style: "margin-left: 10px;") { "➡️ Avançar" }
+        end +
+
+        # ====== Linha 2: Controle de janela ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.show
+            @state[:conteudo] = "Janela visível"
+          }) { "👁️ Mostrar janela" } +
+
+            button(onclick: proc {
+              @automation.hide
+              @state[:conteudo] = "Janela oculta (rodando em background)"
+            }, style: "margin-left: 10px;") { "🙈 Ocultar janela" }
+        end +
+
+        # ====== Linha 3: Interações com página ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.type("input[name='q']", "Glauco Framework Ruby")
+            @state[:conteudo] = "Digitou no campo de busca"
+          }) { "⌨️ Digitar texto" } +
+
+            button(onclick: proc {
+              @automation.submit("form")
+              @state[:conteudo] = "Submeteu formulário"
+            }, style: "margin-left: 10px;") { "📤 Submeter" } +
+
+            button(onclick: proc {
+              @automation.click("input[type='submit']")
+              @state[:conteudo] = "Clicou botão"
+            }, style: "margin-left: 10px;") { "🖱️ Clicar botão" }
+        end +
+
+        # ====== Linha 4: Leitura de conteúdo ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            texto = @automation.read_text("body")
+            @state[:conteudo] = "Texto lido: #{texto[0..80]}..."
+          }) { "📖 Ler texto" } +
+
+            button(onclick: proc {
+              html = @automation.read_html("body")
+              @state[:conteudo] = "HTML capturado (#{html.size} chars)"
+            }, style: "margin-left: 10px;") { "🧾 Ler HTML" } +
+
+            button(onclick: proc {
+              links = @automation.extract_links
+              if links && links.any?
+                @state[:conteudo] = "Encontrados #{links.size} links (ex: #{links.first[:href]})"
+              else
+                @state[:conteudo] = "Nenhum link encontrado"
               end
-            }) { "Entrar" }
-          end
-        else
-          bind(:user_name, div(style: "font-size:18px; margin-bottom:20px;")) do |user_name|
-            puts "user_name binding called with #{user_name}"
-            "Bem-vindo, #{@state[:user_name]}!"
-          end +
-          bind(:messages, div(style: "flex:1; overflow:auto; margin-bottom:10px; border:1px solid #eee; padding:5px")) do |messages| 
-            messages.map do |msg|
-              div("#{msg[:role]}: #{msg[:text]}", style: "margin-bottom:5px;")
-            end
-          end +
+            }, style: "margin-left: 10px;") { "🔗 Extrair links" }
+        end +
 
-          div(style: "display:flex; gap:5px") do
-            # Input de texto
-            input(
-              type: "text",
-              id: "chat_input",
-              placeholder: "Digite sua mensagem",
-              style: "flex:1; padding:5px",
-              onchange: proc { |payload|
-                input_value = payload[0].to_s # payload do browser é uma array de elementos
-              }
-            ) +
+        # ====== Linha 5: Execução de scripts ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.execute_script("document.body.style.background='lightyellow'")
+            @state[:conteudo] = "Executou JS: mudou cor do fundo"
+          }) { "🎨 Executar script" } +
 
-          button(on_click: proc {
-            unless input_value.nil? || input_value.strip.empty?
-              # adiciona mensagem do usuário
-              new_messages = @state[:messages] + [{ role: "user", text: input_value.to_s }]
-              set_state(:messages, new_messages)
+            button(onclick: proc {
+              title = @automation.evaluate_script("document.title")
+              @state[:conteudo] = "Título da página: #{title}"
+            }, style: "margin-left: 10px;") { "📋 Avaliar script" }
+        end +
 
-              run_js("document.querySelector('#chat_input').value=''")
+        # ====== Linha 6: WhatsApp (exemplo especializado) ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.open_whatsapp
+            @state[:conteudo] = "Abriu WhatsApp Web"
+          }) { "💬 Abrir WhatsApp Web" } +
 
-              # Executa LLM fora do observer
-              
-              async do
-                ia_response = LMSLLM.talk(input_value.to_s).to_s
-                puts "LLM response: #{ia_response}"
-                # adiciona resposta da IA
-                new_messages = @state[:messages] + [{ role: "ia", text: ia_response }]
-                set_state(:messages, new_messages)
-              end
-            end
-          }) { "Enviar" }
-            
-          end
+            button(onclick: proc {
+              resultado = @automation.send_whatsapp_message("Contato Teste", "Olá via automação Ruby!")
+              @state[:conteudo] = "WhatsApp: #{resultado}"
+            }, style: "margin-left: 10px;") { "📨 Enviar mensagem" }
+        end +
 
+        # ====== Linha 7: Licitações (exemplo especializado) ======
+        div(style: "margin-bottom: 10px;") do
+          button(onclick: proc {
+            @automation.open_licitacao("https://www.gov.br/compras/pt-br/editais")
+            @state[:conteudo] = "Abriu portal de licitações"
+          }) { "🏛️ Abrir portal de licitações" } +
+
+            button(onclick: proc {
+              editais = @automation.extract_editais
+              @state[:conteudo] = "Extraídos #{editais&.size || 0} editais"
+            }, style: "margin-left: 10px;") { "📑 Extrair editais" } +
+
+            button(onclick: proc {
+              @automation.click_editais_com_prazo(7)
+              @state[:conteudo] = "Clicou editais com prazo ≤ 7 dias"
+            }, style: "margin-left: 10px;") { "⏰ Editais com prazo curto" }
         end
-      end
-
     end
   end
 end
 
-class AppPage < Component
-  def initialize(parent_renderer:)
-    super(parent_renderer: parent_renderer)
-
-    @state = {
-      current_page: "Chat",
-      links: [
-        { name: "Home", href: "#" },
-        { name: "Chat", href: "#" },
-        { name: "Settings", href: "#" },
-        { name: "Logout", href: "#" },
-      ]
-    }
-
-    define_render do
-      script(src: "https://cdn.tailwindcss.com") +
-      style do
-        <<~CSS 
-          @layer base {
-            :root {
-              --sidebar: oklch(0.985 0 0);
-              --sidebar-foreground: oklch(0.145 0 0);
-              --sidebar-primary: oklch(0.205 0 0);
-              --sidebar-primary-foreground: oklch(0.985 0 0);
-              --sidebar-accent: oklch(0.97 0 0);
-              --sidebar-accent-foreground: oklch(0.205 0 0);
-              --sidebar-border: oklch(0.922 0 0);
-              --sidebar-ring: oklch(0.708 0 0);
-            }
-
-            .dark {
-              --sidebar: oklch(0.205 0 0);
-              --sidebar-foreground: oklch(0.985 0 0);
-              --sidebar-primary: oklch(0.488 0.243 264.376);
-              --sidebar-primary-foreground: oklch(0.985 0 0);
-              --sidebar-accent: oklch(0.269 0 0);
-              --sidebar-accent-foreground: oklch(0.985 0 0);
-              --sidebar-border: oklch(1 0 0 / 10%);
-              --sidebar-ring: oklch(0.439 0 0);
-            }
-          }
-        CSS
-      end+
-      main(class: "flex h-screen w-screen bg-sidebar text-sidebar-foreground") do
-        bind(:links, nav(class: "flex flex-col w-48 border-r border-sidebar-border bg-sidebar p-4")) do |links|
-          links.map do |link|
-            a(href: link[:href], class: "mb-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-sidebar-accent hover:text-sidebar-accent-foreground #{'bg-sidebar-primary text-sidebar-primary-foreground' if link[:name] == @state[:current_page]}",
-              onclick: proc {
-                set_state(:current_page, link[:name])
-              }
-            ) do
-              link[:name]
-            end
-          end
-        end+
-        main(class: "flex flex-1 flex-col") do
-          bind(:current_page, div(class: "flex-1")) do |current_page|
-            case current_page
-            when "Chat"
-              ChatPage.new(parent_renderer: self)
-            when "Home"
-              div("Welcome to the Home Page", class: "p-4")
-            when "Settings"
-            when "Logout"
-              div("You have been logged out.", class: "p-4")
-            else
-              div("Page not found", class: "p-4")
-            end
-          end
-        end
-      end
-    end
-      
-  end
-end
-
-class ChatPage < Component
-
-  class Message < Component
-    def initialize(parent_renderer:, role:, text:, avatar: nil)
-      super(parent_renderer: parent_renderer)
-
-      define_render do
-        role_class = role.to_s == "user" ? "is-user" : "is-assistant flex-row-reverse justify-end"
-
-        div(class: "group flex w-full items-end gap-2 py-4 [&>div]:max-w-[80%] #{role_class}") do
-          [
-            MessageAvatar.new(parent_renderer: self, role: role, avatar: avatar),
-            MessageContent.new(parent_renderer: self, text: text, role: role)
-          ]
-        end
-      end
-      
-    end
-  end
-
-  class MessageAvatar < Component
-    def initialize(parent_renderer:, role:, avatar: nil)
-      super(parent_renderer: parent_renderer)
-      @role = role
-      @avatar = avatar
-      puts "MessageAvatar initialized with role=#{@role}, avatar=#{@avatar}"
-    end
-
-    # sobrescreve o render_to_html
-    def render_to_html
-      div(class: "w-8 h-8 rounded-full ring ring-1 ring-border flex items-center justify-center overflow-hidden") do
-        if @avatar
-          img(src: @avatar, alt: @role, class: "w-full h-full object-cover mt-0 mb-0")
-        else
-          span(class: "text-xs text-gray-500") { @role[0].upcase }
-        end
-      end
-    end
-  end
-
-  class MessageContent < Component
-    def initialize(parent_renderer:, text:, role:)
-      super(parent_renderer: parent_renderer)
-      @text = text
-      @role = role
-
-      define_render do
-        div(
-          class: [
-            "flex flex-col gap-2 overflow-hidden rounded-lg px-4 py-3 text-foreground text-sm",
-            (@role == "user" ? "bg-primary text-primary-foreground" : "bg-secondary text-foreground")
-          ].join(" ")
-        ) do
-          div { @text }
-        end
-      end
-    end
-  end
+class AgentsChatDemo < Component
 
   def initialize(parent_renderer:)
     super(parent_renderer: parent_renderer)
+    @automation = BrowserAutoAgent.new
     @state = {
       messages: [
-        { role: "user", text: "Olá, tudo bem?", avatar: "https://i.pravatar.cc/40?u=user1" },
-        { role: "ia", text: "Oi! Tudo ótimo, e você?", avatar: "https://i.pravatar.cc/40?u=assistant" },
-      ]
+        { sender: :agent, text: "👋 Olá! Sou o agente de automação. Envie um comando, por exemplo:\n  - 'Abrir o WhatsApp'\n  - 'Mandar mensagem para João dizendo oi'\n  - 'Abrir o site da prefeitura'" }
+      ],
+      status: "Aguardando comando...",
+      input: ""
     }
+  end
 
-    define_render do
-   
-      div(id: "message-box", class: "p-4") do
-        bind(:messages, div(class: "flex flex-col gap-2 flex-1 overflow-auto p-2")) do |messages|
+  def render
+    div(style: "background:#1e1e1e; color:white; font-family:sans-serif; height:100%; display:flex; flex-direction:column;") do
+
+      # Título
+      h2(style: "padding:10px; background:#333; margin:0;") { "💬 Agente Interativo (LLM + Browser)" } +
+
+        # Histórico de mensagens
+        bind(:messages, div(id: "chat-box", style: "flex:1; overflow-y:auto; padding:10px;")) do |messages|
           messages.map do |msg|
-            Message.new(
-              parent_renderer: self,
-              role: msg[:role],
-              text: msg[:text],
-              avatar: msg[:avatar]
-            )
-          end
-        end+
-        textarea(placeholder: "Type your message here...", class:  "border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 flex field-sizing-content min-h-16 w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm") 
-      end
+            align = msg[:sender] == :user ? "flex-end" : "flex-start"
+            bg = msg[:sender] == :user ? "#007acc" : "#444"
+            div(style: "display:flex; justify-content:#{align}; margin:5px 0;") do
+              div(style: "max-width:75%; background:#{bg}; padding:10px; border-radius:10px; white-space:pre-wrap;") { msg[:text] }
+            end
+          end.reduce(:+)
+        end +
+
+        # Caixa de entrada
+        div(style: "padding:10px; background:#2b2b2b; display:flex;") do
+          input(
+            type: "text",
+            id: "chat-input",
+            placeholder: "Digite um comando (ex: 'abrir o WhatsApp')",
+            oninput: proc { |e|
+              set_state(:input, e)
+            },
+            style: "flex:1; padding:10px; border-radius:6px; border:none; color:black;"
+          ) +
+
+            button(onclick: proc {
+              comando = @state[:input][0]
+              next if comando.strip.empty?
+
+              # Adiciona mensagem do usuário
+              set_state(:messages, @state[:messages] + [{ sender: :user, text: comando }])
+              set_state(:status, "Interpretando comando...")
+
+              # Processamento assíncrono via automação
+              @automation.send(:run_async) do
+                @automation.executar(comando)
+              end
+            },
+                   style: "margin-left:10px; background:#007acc; color:white; border:none; border-radius:6px; padding:10px 15px; cursor:pointer;"
+            ) { "Enviar" }
+        end +
+
+        # Status
+        bind(:status, div(style: "background:#111; padding:5px 10px; color:#aaa; font-size:0.9em;")) do |s|
+          "🔍 #{s}"
+        end
     end
   end
 
+  # ===========================================================
+  # Métodos auxiliares
+  # ===========================================================
+  def append_agent_message(text)
+    @messages << { sender: :agent, text: text }
+    update_view
+  end
+
+  def update_view
+    set_state(:refresh, rand) # força re-renderização
+  end
 end
 
 
-# App rendering
-app = AppPage.new(parent_renderer: $root)
-
+# ====== App Rendering ======
+app = AgentsChatDemo.new(parent_renderer: $root)
 $root.root_component = app
-
 $root.render
 
-# Set window size and open
 $shell.setSize(900, 700)
 $shell.open

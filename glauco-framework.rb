@@ -12,14 +12,26 @@ java_import 'java.awt.Toolkit'
 java_import 'java.awt.datatransfer.DataFlavor'
 java_import 'org.eclipse.swt.dnd.Clipboard'
 java_import 'org.eclipse.swt.dnd.TextTransfer'
+java_import 'org.eclipse.swt.browser.ProgressAdapter'
+java_import 'org.eclipse.swt.browser.ProgressEvent'
+java_import 'org.eclipse.swt.browser.LocationAdapter'
 
 require 'json'
 require 'fileutils'
 require 'open3'
 require 'securerandom'
+require 'ruby_llm'
+
 
 module Frontend
   $callbacks = {}
+
+  def async(&block)
+    $display.async_exec do
+      block.call
+    end
+  end
+
   def browserFunctionFac(callback_name)
     Class.new(Java::OrgEclipseSwtBrowser::BrowserFunction) do
       define_method(:function) do |*args|
@@ -282,7 +294,16 @@ module Frontend
             })();
           JS
 
-          res = @parent_renderer.browser.execute(js)
+          root = @parent_renderer
+          while root && !root.is_a?(Frontend::RootRenderer)
+            root = root.parent_renderer
+          end
+
+          if root && root.browser
+           res = root.browser.execute(js)
+          else
+            warn "[WARN] notify_bindings: No valid browser context for #{self.class}"
+          end
 
           puts "DOM updated for binding #{binding_path_str}"
         end
@@ -301,6 +322,10 @@ module Frontend
 
     def method_missing(method_name, *args, **kwargs, &block)
       tag(method_name, *args, **kwargs, &block)
+    end
+
+    def p(*args, **kwargs, &block)
+      tag(:p, *args, **kwargs, &block)
     end
 
     def respond_to_missing?(method_name, include_private = false)
@@ -328,18 +353,21 @@ module Frontend
 
       html_attrs = attrs.map do |k, v|
         if k.to_s.start_with?("on") && v.is_a?(Proc)
-          @parent_renderer.bind_callback(k, v)
+          puts "Adding event listener for #{k}"
+          $root.bind_callback(k, v)
         else
           "#{k}=\"#{v}\""
         end
       end.join(" ")
+
+      puts "html_attrs before event listeners: #{html_attrs}"
 
       @event_listeners.each do |event, proc_obj|
         html_attrs += " #{add_event_listener(event, &proc_obj)}"
       end
 
       @attrs.each do |k, v|
-        html_attrs += "#{k}=\"#{v}\""
+        html_attrs += " #{k}=\"#{v}\" "
       end
 
       res = "<#{name} #{html_attrs}>#{inner_content}</#{name}>"
@@ -350,14 +378,10 @@ module Frontend
 
     def render_to_html
       # Guard principal: verificar se o componente tem um bloco de renderização
-      unless defined?(@render_block) && @render_block.is_a?(Proc)
-        puts "⚠️ [GUARD] Nenhum bloco de renderização definido para #{self.class}. Retornando string vazia."
-        return ""
-      end
 
       begin
         # Tentativa de renderização com segurança
-        html = instance_eval(&@render_block)
+        html = self.render
         unless html.is_a?(String)
           puts "⚠️ [GUARD] Resultado inesperado do render_block em #{self.class}: #{html.class}. Convertendo para string."
           html = html.to_s
@@ -382,15 +406,6 @@ module Frontend
     end
 
 
-
-    def define_render(&block)
-      @render_block = block
-    end
-
-    def render
-      instance_eval(&@render_block)
-    end
-
     def run_js(js_code)
       @parent_renderer.browser.evaluate(js_code)
     end
@@ -412,12 +427,6 @@ $shell.setLayout(FillLayout.new)
 $browser = Browser.new($shell, 0)
 $root = Frontend::RootRenderer.new($browser)
 
-def async(&block)
-  $display.async_exec do
-    block.call
-  end
-end
-
 at_exit do
   # Event loop
   while !$shell.disposed?
@@ -425,3 +434,521 @@ at_exit do
   end
   $display.dispose  
 end
+
+module Agents
+  class BrowserAutoAgent
+    attr_reader :browser, :state, :display, :shell, :visible
+
+    MODEL_ROOT_FOLDER = "vendor"
+    MODEL_OPTIONS = [
+      {
+        file: File.join(MODEL_ROOT_FOLDER, "gemma-3n-E4B-it-Q4_K_M.gguf"),
+        identifier: "gemma-3n-e4b-it-text",
+      }
+    ]
+    LMS_EXE_PATH = File.join(ENV['USERPROFILE'] || ENV['HOME'], ".lmstudio", "bin", "lms.exe")
+    LMSTUDIO_EXE = "vendor\\LM Studio\\LM Studio.exe"
+    MODEL_PATH = MODEL_OPTIONS[0][:file]
+    MODEL_IDENTIFIER = MODEL_OPTIONS[0][:identifier]
+    SERVER_PORT = "1234"
+
+    def initialize
+
+      require 'ruby_llm'
+
+      Thread.new do
+        unless File.exist?(LMS_EXE_PATH)
+          puts "Starting LM Studio headless..."
+          system("#{LMSTUDIO_EXE} --headless")
+        end
+
+        runtime_src  = File.join("vendor", ".lmstudio")
+        runtime_dest = File.join(Dir.home, ".lmstudio")
+
+        unless Dir.exist?(runtime_dest)
+          puts "Copying runtime to #{runtime_dest}..."
+          FileUtils.mkdir_p(File.dirname(runtime_dest))
+          FileUtils.cp_r(runtime_src, runtime_dest)
+        end
+
+        puts "Importing model..."
+        system("#{LMS_EXE_PATH} import #{MODEL_PATH} -y --hard-link")
+        puts "Loading model..."
+        system("#{LMS_EXE_PATH} load #{MODEL_IDENTIFIER} -y --identifier #{MODEL_IDENTIFIER}")
+        puts "Starting LM Studio server... #{LMS_EXE_PATH}"
+        spawn(LMS_EXE_PATH, "server", "start", "--port", SERVER_PORT, out: $stdout, err: $stderr)
+        sleep 3 # aguarda servidor iniciar
+
+      end
+      # Reutiliza Display/Shell globais se existirem
+      # Apenas cria event loop se ainda não houver um ativo
+      unless defined?($display_loop_started) && $display_loop_started
+        Thread.new do
+          @display = Display.new
+          @shell = Shell.new(@display)
+          @shell.setLayout(FillLayout.new)
+
+          @browser = Browser.new(@shell, 0)
+          @shell.setText("Agente de Automação")
+          @visible = false
+
+          @state = { current_url: nil, last_action: nil, context: {} }
+          $display_loop_started = true
+          while !@shell.disposed?
+            @display.sleep unless @display.read_and_dispatch
+          end
+          @display.dispose
+        end
+      end
+    end
+
+    # ===========================================================
+    # Inicialização sob demanda
+    # ===========================================================
+    # ===========================================================
+    # Navegação principal
+    # ===========================================================
+    def open(url, visible: true)
+      run_async do
+        # Reabre shell se tiver sido fechado manualmente
+        if @shell.disposed?
+          @shell = Shell.new(@display)
+          @shell.setLayout(FillLayout.new)
+          @browser = Browser.new(@shell, 0)
+          @shell.setText("Agente WebAutomation")
+        end
+
+        @shell.setVisible(visible)
+        @visible = visible
+
+        @browser.setUrl(url)
+        @state[:current_url] = url
+        @state[:last_action] = "open"
+      end
+    end
+
+    def show
+      run_async { @shell.setVisible(true); @visible = true }
+    end
+
+    def hide
+      run_async { @shell.setVisible(false); @visible = false }
+    end
+
+    def reload
+      run_async { @browser.refresh;  }
+    end
+
+    def back
+      run_async { @browser.back; @state[:last_action] = "back" }
+    end
+
+    def forward
+      run_async { @browser.forward; @state[:last_action] = "forward" }
+    end
+
+    # ===========================================================
+    # Interações com a página
+    # ===========================================================
+    def click(selector)
+      js = <<~JS
+        (function() {
+          var el = document.querySelector("#{selector}");
+          if (el) el.click();
+        })();
+      JS
+      run_async { @browser.execute(js) }
+      @state[:last_action] = "click:#{selector}"
+    end
+
+    def type(selector, text)
+      js = <<~JS
+        (function() {
+          var el = document.querySelector("#{selector}");
+          if (el) {
+            el.focus();
+            el.value = "#{escape_js(text)}";
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        })();
+      JS
+      run_async { @browser.execute(js) }
+      @state[:last_action] = "type:#{selector}"
+    end
+
+    def submit(selector)
+      js = <<~JS
+        (function() {
+          var el = document.querySelector("#{selector}");
+          if (el && el.tagName === 'FORM') el.submit();
+        })();
+      JS
+      run_async { @browser.execute(js) }
+      @state[:last_action] = "submit:#{selector}"
+    end
+
+    # ===========================================================
+    # Leitura e utilitários
+    # ===========================================================
+    def read_text(selector)
+      evaluate(<<~JS, "read_text:#{selector}")
+        (function() {
+          var el = document.querySelector("#{selector}");
+          return el ? el.innerText : null;
+        })();
+      JS
+    end
+
+    def read_html(selector)
+      evaluate(<<~JS, "read_html:#{selector}")
+        (function() {
+          var el = document.querySelector("#{selector}");
+          return el ? el.outerHTML : null;
+        })();
+      JS
+    end
+
+    def extract_links
+      evaluate(<<~JS, "extract_links")
+        Array.from(document.querySelectorAll('a'))
+          .map(a => ({ text: a.innerText.trim(), href: a.href }));
+      JS
+    end
+
+    def capture_dom
+      evaluate("document.documentElement.outerHTML", "capture_dom")
+    end
+
+    def execute_script(js)
+      run_async { @browser.execute(js) }
+    end
+
+    def evaluate_script(js)
+      evaluate(js)
+    end
+
+    def escape_js(str)
+      str.to_s.gsub('"', '\"').gsub("\n", "\\n")
+    end
+
+    # ===========================================================
+    # Helpers internos
+    # ===========================================================
+    private
+
+    def run_async(&block)
+      raise "Browser ainda não inicializado" unless @browser
+      @display.async_exec(&block)
+    end
+
+    def evaluate(js, last_action = nil)
+      puts js
+      # puts @browser.evaluate("return document.body.toString();")
+    end
+
+    module ApiAutomacoes
+      def open_whatsapp(visible: true)
+        open("https://web.whatsapp.com/", visible: visible)
+      end
+
+      def abrir(url)
+        open(url, visible: true)
+      end
+
+      def rodar_js(codigo)
+        puts @browser.evaluate(codigo)
+      end
+
+      def rodar_teste(*_args)
+        puts "rodando"
+
+        browser = @browser # mantém a referência acessível dentro dos métodos
+
+        # cria uma subclasse concreta do LocationAdapter Java
+        listener = Class.new(LocationAdapter) do
+          define_method :changing do |event|
+            puts "About to change location to: #{event.location}"
+          end
+
+          define_method :changed do |event|
+            puts "Location changed to: #{event.location}"
+            begin
+              html = browser.evaluate("return document.querySelector('.uU7dJb').innerHTML")
+              puts "HTML capturado: #{html ? html[0..80] + '...' : 'vazio'}"
+            rescue => e
+              puts "Erro ao avaliar DOM: #{e.message}"
+            end
+          end
+        end.new
+
+        # adiciona o listener ao browser
+        @browser.addLocationListener(listener)
+        open("http://www.google.com", visible: true)
+      end
+
+      def send_whatsapp_message(contact_name, message)
+        # ✅ 1. Garante que o ambiente gráfico existe
+        if @display.nil? || @shell.nil? || @browser.nil? || @shell.disposed?
+          puts "[Automation] ⚠️ Ambiente gráfico não disponível. Recriando..."
+          open_whatsapp(visible: true)
+          sleep 2
+        end
+
+        # ✅ 2. Garante que o WhatsApp Web está aberto
+        current_url = nil
+        begin
+          current_url = @browser.getUrl
+        rescue => e
+          puts "[Automation] ⚠️ Erro ao obter URL: #{e.message}"
+        end
+
+        unless current_url&.include?("web.whatsapp.com")
+          puts "[Automation] 🌐 WhatsApp Web não está aberto. Abrindo..."
+          open_whatsapp(visible: true)
+        end
+
+        sleep 3
+
+
+        # ✅ 5. Executa o JS para envio da mensagem
+        js = <<~JS
+          (function() {
+            var chat = Array.from(document.querySelectorAll("span[title='#{escape_js(contact_name)}']")).pop();
+            if (!chat) return "Contato não encontrado";
+            chat.click();
+            setTimeout(function() {
+              var box = document.querySelector("div[contenteditable='true']");
+              if (!box) return "Caixa de mensagem não encontrada";
+              box.textContent = "#{escape_js(message)}";
+              var evt = new InputEvent('input', { bubbles: true });
+              box.dispatchEvent(evt);
+              document.querySelector("span[data-icon='send']").click();
+            }, 700);
+            return "Mensagem enviada";
+          })();
+        JS
+
+        result = evaluate(js, "whatsapp_send:#{contact_name}")
+        puts "[Automation] Resultado do envio: #{result.inspect}"
+        result
+      end
+      # ---- Portais de Licitação ----
+      def open_licitacao(url = "https://www.gov.br/compras/pt-br/editais", visible: true)
+        open(url, visible: visible)
+      end
+
+      def extract_editais
+        js = <<~JS
+        Array.from(document.querySelectorAll("table tr")).map(tr => {
+          const cols = tr.querySelectorAll("td");
+          return {
+            nome: cols[0]?.innerText.trim(),
+            orgao: cols[1]?.innerText.trim(),
+            prazo: cols[2]?.innerText.trim()
+          };
+        });
+      JS
+        evaluate(js, "extract_editais")
+      end
+
+      def click_editais_com_prazo(dias)
+        js = <<~JS
+        (function() {
+          let hoje = new Date();
+          Array.from(document.querySelectorAll("table tr")).forEach(tr => {
+            let prazo = tr.cells[2]?.innerText.trim();
+            if (!prazo) return;
+            let partes = prazo.split("/");
+            if (partes.length === 3) {
+              let data = new Date(partes[2], partes[1]-1, partes[0]);
+              let diff = (data - hoje) / (1000*60*60*24);
+              if (diff <= #{dias}) tr.click();
+            }
+          });
+        })();
+      JS
+        run_async { @browser.execute(js) }
+        @state[:last_action] = "click_editais_com_prazo<=#{dias}"
+      end
+
+    end
+
+    include ApiAutomacoes
+
+
+
+    public
+    def setup_llm
+      return @chat if defined?(@chat) && @chat
+
+      RubyLLM.configure do |config|
+        config.openai_api_key = 'none'
+        config.openai_api_base = "http://127.0.0.1:#{SERVER_PORT}/v1"
+      end
+
+      @chat = RubyLLM.chat(
+        model: MODEL_IDENTIFIER,
+        provider: :openai,
+        assume_model_exists: true
+      )
+
+      @chat.with_instructions <<~SYS
+        Você é um agente de automação integrado ao módulo Ruby `Agents`.
+        Seu papel é converter comandos em linguagem natural em chamadas Ruby diretas,
+        usando os métodos disponíveis listados pelo sistema.
+
+        ⚙️ Regras:
+        - Retorne apenas **uma linha Ruby válida**, sem explicações.
+        - Nunca invente métodos que não estão na lista.
+        - Use parâmetros coerentes com os nomes e tipos indicados.
+        - Prefira aspas duplas em strings.
+        - Se não for possível mapear, retorne `nil`.
+
+        Exemplo:
+        Entrada: "mande mensagem para Maria dizendo oi"
+        Saída: `Agents.whatsapp_enviar(contato: "Maria", mensagem: "oi")`
+      SYS
+
+      @chat
+    end
+
+
+    def funcoes_disponiveis
+      # lista apenas os métodos definidos DIRETAMENTE no módulo
+      api_methods = ApiAutomacoes.instance_methods(false)
+
+      api_methods.map do |m|
+        um = ApiAutomacoes.instance_method(m)
+        # parameters: [[:keyreq, :contato], [:key, :visible], ...]
+        args = um.parameters.map do |kind, name|
+          # documenta como keyword (ex.: :contato, :visible)
+          name
+        end.compact
+        { nome: m.to_s, args: args }
+      end
+    end
+
+    # ===========================================================
+    # 🧠 Interpreta e retorna uma linha Ruby direta
+    # ===========================================================
+    def interpretar(input_text)
+      setup_llm
+
+      lista_funcoes = funcoes_disponiveis.map do |f|
+        args_sig = f[:args].map { |a| "#{a}:" }.join(", ")
+        # instruímos o modelo a responder com Agents.<nome>(...)
+        "Agents.#{f[:nome]}(#{args_sig})"
+      end.join("\n")
+
+      prompt = <<~PROMPT
+        Comando do usuário:
+        "#{input_text}"
+    
+        Métodos disponíveis (chame EXATAMENTE como abaixo):
+        #{lista_funcoes}
+    
+        Gere apenas UMA linha Ruby chamando um dos métodos acima.
+      PROMPT
+
+      result = ""
+      setup_llm.ask(prompt) { |chunk| result << chunk.content.to_s }
+
+      # extrai a linha Agents.xxx(...)
+      result.strip[/`?(Agents\..*?)`?$/m, 1]
+    end
+
+    # ===========================================================
+    # 🚀 Executa o comando diretamente
+    # ===========================================================
+    def executar(input_text)
+      code_line = interpretar(input_text)
+
+      if code_line.nil? || code_line.strip.empty?
+        puts "[Interpreter] ❌ Nenhum comando interpretado."
+        return nil
+      end
+
+      puts "[Interpreter] Interpretação: #{code_line}"
+
+      if code_line =~ /Agents\.(\w+)\s*\((.*)\)\s*$/
+        metodo = Regexp.last_match(1)
+        args_str = Regexp.last_match(2)
+        args = parse_args(args_str) || {}
+
+        unless ApiAutomacoes.instance_methods(false).map(&:to_s).include?(metodo)
+          puts "[Interpreter] ⚠️ Método '#{metodo}' não faz parte da ApiAutomacoes."
+          return nil
+        end
+
+        puts "[Interpreter] Chamando ApiAutomacoes##{metodo} com #{args.inspect}"
+
+        begin
+          method_ref = ApiAutomacoes.instance_method(metodo)
+          params = method_ref.parameters
+          puts "[Interpreter] Parâmetros esperados: #{params.inspect}"
+
+          bound_method = method_ref.bind(self)
+
+          if params.empty? || args.empty?
+            puts "➡️ executando #{metodo} sem argumentos"
+            result = bound_method.call
+          elsif params.any? { |t, _| [:key, :keyreq, :keyrest].include?(t) }
+            puts "➡️ executando #{metodo} com keyword args"
+            result = bound_method.call(**args)
+          else
+            puts "➡️ executando #{metodo} com posicionais"
+            result = bound_method.call(*args.values)
+          end
+
+          puts "[Interpreter] ✅ #{metodo} executado com sucesso."
+          result
+
+        rescue ArgumentError => e
+          if e.message =~ /given 1, expected 0/
+            puts "[Interpreter] ⚙️ Corrigindo execução para aceitar argumento fantasma..."
+            begin
+              result = ApiAutomacoes.instance_method(metodo).bind(self).call(nil)
+              puts "[Interpreter] ✅ Reexecutado com argumento vazio."
+              return result
+            rescue => e2
+              puts "[Interpreter] ❌ Falha final: #{e2.class} - #{e2.message}"
+            end
+          else
+            puts "[Interpreter] ⚠️ ArgumentError: #{e.message}"
+          end
+          nil
+
+        rescue => e
+          puts "[Interpreter] 💥 Erro em '#{metodo}': #{e.class} - #{e.message}"
+          puts e.backtrace.first(5).join("\n")
+          nil
+        end
+
+      else
+        puts "[Interpreter] ⚠️ Linha Ruby não reconhecida: #{code_line.inspect}"
+        nil
+      end
+    end
+
+    def parse_args(str)
+      args = {}
+      return args if str.nil? || str.strip.empty?
+
+      # keywords com string: key: "value"
+      str.scan(/(\w+):\s*"([^"]*)"/).each do |k, v|
+        args[k.to_sym] = v
+      end
+
+      # keywords com numérico (ex.: dias: 7)
+      str.scan(/(\w+):\s*(\d+)\b/).each do |k, v|
+        args[k.to_sym] = v.to_i
+      end
+
+      args
+    end
+
+  end
+
+end
+
+
