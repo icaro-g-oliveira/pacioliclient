@@ -15,6 +15,8 @@ java_import 'org.eclipse.swt.dnd.TextTransfer'
 java_import 'org.eclipse.swt.browser.ProgressAdapter'
 java_import 'org.eclipse.swt.browser.ProgressEvent'
 java_import 'org.eclipse.swt.browser.LocationAdapter'
+java_import 'org.eclipse.swt.events.ShellListener'
+java_import 'org.eclipse.swt.widgets.Listener'
 
 require 'json'
 require 'fileutils'
@@ -450,55 +452,46 @@ module Agents
     LMSTUDIO_EXE = "vendor\\LM Studio\\LM Studio.exe"
     MODEL_PATH = MODEL_OPTIONS[0][:file]
     MODEL_IDENTIFIER = MODEL_OPTIONS[0][:identifier]
-    SERVER_PORT = "1234"
+    SERVER_PORT = "1235"
+
+    puts "Importing model..."
+    system("#{LMS_EXE_PATH} import #{MODEL_PATH} -y --hard-link")
+    puts "Loading model..."
+    system("#{LMS_EXE_PATH} load #{MODEL_IDENTIFIER} -y --identifier #{MODEL_IDENTIFIER}")
+    puts "Starting LM Studio server... #{LMS_EXE_PATH}"
+    spawn(LMS_EXE_PATH, "server", "start", "--port", SERVER_PORT, out: $stdout, err: $stderr)
+    sleep 3 # aguarda servidor iniciar
 
     def initialize
-
       require 'ruby_llm'
 
+      setup_llm
+
+      # 🔁 Evita recriar se já houver loop ativo
+      return if defined?($display_loop_started) && $display_loop_started
+
       Thread.new do
-        unless File.exist?(LMS_EXE_PATH)
-          puts "Starting LM Studio headless..."
-          system("#{LMSTUDIO_EXE} --headless")
-        end
+        @display = Display.new
+        @shell = Shell.new(@display)
+        @shell.setLayout(FillLayout.new)
+        @browser = Browser.new(@shell, 0)
+        @shell.setText("Agente de Automação")
+        @visible = false
+        @state = { current_url: nil, last_action: nil, context: {} }
 
-        runtime_src  = File.join("vendor", ".lmstudio")
-        runtime_dest = File.join(Dir.home, ".lmstudio")
+        # ✅ Intercepta fechamento manual (fecha → só esconde)
 
-        unless Dir.exist?(runtime_dest)
-          puts "Copying runtime to #{runtime_dest}..."
-          FileUtils.mkdir_p(File.dirname(runtime_dest))
-          FileUtils.cp_r(runtime_src, runtime_dest)
-        end
-
-        puts "Importing model..."
-        system("#{LMS_EXE_PATH} import #{MODEL_PATH} -y --hard-link")
-        puts "Loading model..."
-        system("#{LMS_EXE_PATH} load #{MODEL_IDENTIFIER} -y --identifier #{MODEL_IDENTIFIER}")
-        puts "Starting LM Studio server... #{LMS_EXE_PATH}"
-        spawn(LMS_EXE_PATH, "server", "start", "--port", SERVER_PORT, out: $stdout, err: $stderr)
-        sleep 3 # aguarda servidor iniciar
-
-      end
-      # Reutiliza Display/Shell globais se existirem
-      # Apenas cria event loop se ainda não houver um ativo
-      unless defined?($display_loop_started) && $display_loop_started
-        Thread.new do
-          @display = Display.new
-          @shell = Shell.new(@display)
-          @shell.setLayout(FillLayout.new)
-
-          @browser = Browser.new(@shell, 0)
-          @shell.setText("Agente de Automação")
-          @visible = false
-
-          @state = { current_url: nil, last_action: nil, context: {} }
-          $display_loop_started = true
-          while !@shell.disposed?
+        # 🚫 NÃO dá dispose do Display!
+        while true
+          begin
             @display.sleep unless @display.read_and_dispatch
+          rescue Java::OrgEclipseSwt::SWTException => e
+            puts "[Automation] ⚠️ Loop SWT interrompido: #{e.message}"
+            break
           end
-          @display.dispose
         end
+
+        puts "[Automation] 🧩 Event loop encerrado (Display dispose manual)"
       end
     end
 
@@ -508,45 +501,54 @@ module Agents
     # ===========================================================
     # Navegação principal
     # ===========================================================
-    def open(url, visible: true)
+
+    def open(url, visible: true, on_changing: nil, on_changed: nil)
       run_async do
-        # Reabre shell se tiver sido fechado manualmente
-        if @shell.disposed?
-          @shell = Shell.new(@display)
-          @shell.setLayout(FillLayout.new)
-          @browser = Browser.new(@shell, 0)
-          @shell.setText("Agente WebAutomation")
-        end
 
         @shell.setVisible(visible)
         @visible = visible
+
+        browser = @browser
+
+        if on_changing || on_changed
+          listener = Class.new(LocationAdapter) do
+            define_method(:changing) do |event|
+              begin
+                on_changing.call(event) if on_changing
+              rescue => e
+                puts "[open:on_changing] Erro: #{e.class} - #{e.message}"
+              end
+            end
+
+            define_method(:changed) do |event|
+              begin
+                on_changed.call(event, browser) if on_changed
+              rescue => e
+                puts "[open:on_changed] Erro: #{e.class} - #{e.message}"
+              end
+            end
+          end.new
+
+          browser.addLocationListener(listener)
+        end
 
         @browser.setUrl(url)
         @state[:current_url] = url
         @state[:last_action] = "open"
       end
     end
-
-    def show
-      run_async { @shell.setVisible(true); @visible = true }
-    end
-
     def hide
       run_async { @shell.setVisible(false); @visible = false }
     end
-
     def reload
       run_async { @browser.refresh;  }
     end
-
     def back
       run_async { @browser.back; @state[:last_action] = "back" }
     end
-
     def forward
       run_async { @browser.forward; @state[:last_action] = "forward" }
     end
-
     # ===========================================================
     # Interações com a página
     # ===========================================================
@@ -624,66 +626,58 @@ module Agents
     end
 
     def evaluate_script(js)
-      evaluate(js)
+      @browser.evaluate(js)
     end
 
     def escape_js(str)
       str.to_s.gsub('"', '\"').gsub("\n", "\\n")
     end
-
     # ===========================================================
     # Helpers internos
     # ===========================================================
     private
 
     def run_async(&block)
-      raise "Browser ainda não inicializado" unless @browser
-      @display.async_exec(&block)
+      # 🚀 Executa o bloco no display ativo
+      begin
+        @display.async_exec do
+          begin
+            block.call
+          rescue => e
+            puts "[run_async] ⚠️ Erro dentro do bloco: #{e.class} - #{e.message}"
+          end
+        end
+      rescue Java::OrgEclipseSwt::SWTException => e
+        puts "[run_async] 💥 SWTException: #{e.message}"
+        # Se der erro mesmo assim, recria e tenta novamente
+        retry
+      end
+
     end
 
-    def evaluate(js, last_action = nil)
-      puts js
-      # puts @browser.evaluate("return document.body.toString();")
-    end
 
     module ApiAutomacoes
       def open_whatsapp(visible: true)
         open("https://web.whatsapp.com/", visible: visible)
       end
 
+      def show
+        run_async { @shell.setVisible(true); @visible = true }
+      end
+
       def abrir(url)
         open(url, visible: true)
       end
 
-      def rodar_js(codigo)
-        puts @browser.evaluate(codigo)
-      end
-
-      def rodar_teste(*_args)
+      def rodar_teste(url)
         puts "rodando"
 
-        browser = @browser # mantém a referência acessível dentro dos métodos
-
-        # cria uma subclasse concreta do LocationAdapter Java
-        listener = Class.new(LocationAdapter) do
-          define_method :changing do |event|
-            puts "About to change location to: #{event.location}"
-          end
-
-          define_method :changed do |event|
-            puts "Location changed to: #{event.location}"
-            begin
-              html = browser.evaluate("return document.querySelector('.uU7dJb').innerHTML")
-              puts "HTML capturado: #{html ? html[0..80] + '...' : 'vazio'}"
-            rescue => e
-              puts "Erro ao avaliar DOM: #{e.message}"
-            end
-          end
-        end.new
-
-        # adiciona o listener ao browser
-        @browser.addLocationListener(listener)
-        open("http://www.google.com", visible: true)
+        open(
+          url,
+          visible: true,
+          on_changing: ->(event) { puts "🔄 Navegando para #{event.location}" },
+          on_changed:  ->(event, browser) { puts "✅ Página carregada: #{browser.evaluate('return document.title')}" }
+        )
       end
 
       def send_whatsapp_message(contact_name, message)
@@ -708,7 +702,6 @@ module Agents
         end
 
         sleep 3
-
 
         # ✅ 5. Executa o JS para envio da mensagem
         js = <<~JS
@@ -739,34 +732,34 @@ module Agents
 
       def extract_editais
         js = <<~JS
-        Array.from(document.querySelectorAll("table tr")).map(tr => {
-          const cols = tr.querySelectorAll("td");
-          return {
-            nome: cols[0]?.innerText.trim(),
-            orgao: cols[1]?.innerText.trim(),
-            prazo: cols[2]?.innerText.trim()
-          };
-        });
-      JS
+          Array.from(document.querySelectorAll("table tr")).map(tr => {
+            const cols = tr.querySelectorAll("td");
+            return {
+              nome: cols[0]?.innerText.trim(),
+              orgao: cols[1]?.innerText.trim(),
+              prazo: cols[2]?.innerText.trim()
+            };
+          });
+        JS
         evaluate(js, "extract_editais")
       end
 
       def click_editais_com_prazo(dias)
         js = <<~JS
-        (function() {
-          let hoje = new Date();
-          Array.from(document.querySelectorAll("table tr")).forEach(tr => {
-            let prazo = tr.cells[2]?.innerText.trim();
-            if (!prazo) return;
-            let partes = prazo.split("/");
-            if (partes.length === 3) {
-              let data = new Date(partes[2], partes[1]-1, partes[0]);
-              let diff = (data - hoje) / (1000*60*60*24);
-              if (diff <= #{dias}) tr.click();
-            }
-          });
-        })();
-      JS
+          (function() {
+            let hoje = new Date();
+            Array.from(document.querySelectorAll("table tr")).forEach(tr => {
+              let prazo = tr.cells[2]?.innerText.trim();
+              if (!prazo) return;
+              let partes = prazo.split("/");
+              if (partes.length === 3) {
+                let data = new Date(partes[2], partes[1]-1, partes[0]);
+                let diff = (data - hoje) / (1000*60*60*24);
+                if (diff <= #{dias}) tr.click();
+              }
+            });
+          })();
+        JS
         run_async { @browser.execute(js) }
         @state[:last_action] = "click_editais_com_prazo<=#{dias}"
       end
@@ -775,10 +768,11 @@ module Agents
 
     include ApiAutomacoes
 
-
-
     public
     def setup_llm
+
+
+
       return @chat if defined?(@chat) && @chat
 
       RubyLLM.configure do |config|
@@ -789,6 +783,7 @@ module Agents
       @chat = RubyLLM.chat(
         model: MODEL_IDENTIFIER,
         provider: :openai,
+
         assume_model_exists: true
       )
 
@@ -808,6 +803,9 @@ module Agents
         Entrada: "mande mensagem para Maria dizendo oi"
         Saída: `Agents.whatsapp_enviar(contato: "Maria", mensagem: "oi")`
       SYS
+
+      @chat.with_temperature(0.0)
+
 
       @chat
     end

@@ -224,6 +224,8 @@ end
 
 
 # ====== App Rendering ======
+# componente de
+
 app = AgentsChatDemo.new(parent_renderer: $root)
 $root.root_component = app
 $root.render
