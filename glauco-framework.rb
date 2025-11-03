@@ -495,457 +495,432 @@ module Agents
       end
     end
 
-    # ===========================================================
-    # Inicialização sob demanda
-    # ===========================================================
-    # ===========================================================
-    # Navegação principal
-    # ===========================================================
-
-    def open(url, visible: true, on_changing: nil, on_changed: nil)
-      run_async do
-
-        @shell.setVisible(visible)
-        @visible = visible
-
-        browser = @browser
-
-        if on_changing || on_changed
-          listener = Class.new(LocationAdapter) do
-            define_method(:changing) do |event|
-              begin
-                on_changing.call(event) if on_changing
-              rescue => e
-                puts "[open:on_changing] Erro: #{e.class} - #{e.message}"
-              end
-            end
-
-            define_method(:changed) do |event|
-              begin
-                on_changed.call(event, browser) if on_changed
-              rescue => e
-                puts "[open:on_changed] Erro: #{e.class} - #{e.message}"
-              end
-            end
-          end.new
-
-          browser.addLocationListener(listener)
-        end
-
-        @browser.setUrl(url)
-        @state[:current_url] = url
-        @state[:last_action] = "open"
+  # Protótipos de métodos de automação
+      def hide
+        run_async { @shell.setVisible(false); @visible = false }
       end
-    end
-    def hide
-      run_async { @shell.setVisible(false); @visible = false }
-    end
-    def reload
-      run_async { @browser.refresh;  }
-    end
-    def back
-      run_async { @browser.back; @state[:last_action] = "back" }
-    end
-    def forward
-      run_async { @browser.forward; @state[:last_action] = "forward" }
-    end
-    # ===========================================================
-    # Interações com a página
-    # ===========================================================
-    def click(selector)
-      js = <<~JS
-        (function() {
-          var el = document.querySelector("#{selector}");
-          if (el) el.click();
-        })();
-      JS
-      run_async { @browser.execute(js) }
-      @state[:last_action] = "click:#{selector}"
-    end
-
-    def type(selector, text)
-      js = <<~JS
-        (function() {
-          var el = document.querySelector("#{selector}");
-          if (el) {
-            el.focus();
-            el.value = "#{escape_js(text)}";
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-          }
-        })();
-      JS
-      run_async { @browser.execute(js) }
-      @state[:last_action] = "type:#{selector}"
-    end
-
-    def submit(selector)
-      js = <<~JS
-        (function() {
-          var el = document.querySelector("#{selector}");
-          if (el && el.tagName === 'FORM') el.submit();
-        })();
-      JS
-      run_async { @browser.execute(js) }
-      @state[:last_action] = "submit:#{selector}"
-    end
-
-    # ===========================================================
-    # Leitura e utilitários
-    # ===========================================================
-    def read_text(selector)
-      evaluate(<<~JS, "read_text:#{selector}")
-        (function() {
-          var el = document.querySelector("#{selector}");
-          return el ? el.innerText : null;
-        })();
-      JS
-    end
-
-    def read_html(selector)
-      evaluate(<<~JS, "read_html:#{selector}")
-        (function() {
-          var el = document.querySelector("#{selector}");
-          return el ? el.outerHTML : null;
-        })();
-      JS
-    end
-
-    def extract_links
-      evaluate(<<~JS, "extract_links")
-        Array.from(document.querySelectorAll('a'))
-          .map(a => ({ text: a.innerText.trim(), href: a.href }));
-      JS
-    end
-
-    def capture_dom
-      evaluate("document.documentElement.outerHTML", "capture_dom")
-    end
-
-    def execute_script(js)
-      run_async { @browser.execute(js) }
-    end
-
-    def evaluate_script(js)
-      @browser.evaluate(js)
-    end
-
-    def escape_js(str)
-      str.to_s.gsub('"', '\"').gsub("\n", "\\n")
-    end
-    # ===========================================================
-    # Helpers internos
-    # ===========================================================
-    private
-
-    def run_async(&block)
-      # 🚀 Executa o bloco no display ativo
-      begin
-        @display.async_exec do
-          begin
-            block.call
-          rescue => e
-            puts "[run_async] ⚠️ Erro dentro do bloco: #{e.class} - #{e.message}"
-          end
-        end
-      rescue Java::OrgEclipseSwt::SWTException => e
-        puts "[run_async] 💥 SWTException: #{e.message}"
-        # Se der erro mesmo assim, recria e tenta novamente
-        retry
+      def reload
+        run_async { @browser.refresh;  }
       end
-
-    end
-
-
-    module ApiAutomacoes
-      def open_whatsapp(visible: true)
-        open("https://web.whatsapp.com/", visible: visible)
+      def back
+        run_async { @browser.back; @state[:last_action] = "back" }
       end
-
-      def show
-        run_async { @shell.setVisible(true); @visible = true }
+      def forward
+        run_async { @browser.forward; @state[:last_action] = "forward" }
       end
-
-      def abrir(url)
-        open(url, visible: true)
-      end
-
-      def rodar_teste(url)
-        puts "rodando"
-
-        open(
-          url,
-          visible: true,
-          on_changing: ->(event) { puts "🔄 Navegando para #{event.location}" },
-          on_changed:  ->(event, browser) { puts "✅ Página carregada: #{browser.evaluate('return document.title')}" }
-        )
-      end
-
-      def send_whatsapp_message(contact_name, message)
-        # ✅ 1. Garante que o ambiente gráfico existe
-        if @display.nil? || @shell.nil? || @browser.nil? || @shell.disposed?
-          puts "[Automation] ⚠️ Ambiente gráfico não disponível. Recriando..."
-          open_whatsapp(visible: true)
-          sleep 2
-        end
-
-        # ✅ 2. Garante que o WhatsApp Web está aberto
-        current_url = nil
-        begin
-          current_url = @browser.getUrl
-        rescue => e
-          puts "[Automation] ⚠️ Erro ao obter URL: #{e.message}"
-        end
-
-        unless current_url&.include?("web.whatsapp.com")
-          puts "[Automation] 🌐 WhatsApp Web não está aberto. Abrindo..."
-          open_whatsapp(visible: true)
-        end
-
-        sleep 3
-
-        # ✅ 5. Executa o JS para envio da mensagem
+      def click(selector)
         js = <<~JS
           (function() {
-            var chat = Array.from(document.querySelectorAll("span[title='#{escape_js(contact_name)}']")).pop();
-            if (!chat) return "Contato não encontrado";
-            chat.click();
-            setTimeout(function() {
-              var box = document.querySelector("div[contenteditable='true']");
-              if (!box) return "Caixa de mensagem não encontrada";
-              box.textContent = "#{escape_js(message)}";
-              var evt = new InputEvent('input', { bubbles: true });
-              box.dispatchEvent(evt);
-              document.querySelector("span[data-icon='send']").click();
-            }, 700);
-            return "Mensagem enviada";
-          })();
-        JS
-
-        result = evaluate(js, "whatsapp_send:#{contact_name}")
-        puts "[Automation] Resultado do envio: #{result.inspect}"
-        result
-      end
-      # ---- Portais de Licitação ----
-      def open_licitacao(url = "https://www.gov.br/compras/pt-br/editais", visible: true)
-        open(url, visible: visible)
-      end
-
-      def extract_editais
-        js = <<~JS
-          Array.from(document.querySelectorAll("table tr")).map(tr => {
-            const cols = tr.querySelectorAll("td");
-            return {
-              nome: cols[0]?.innerText.trim(),
-              orgao: cols[1]?.innerText.trim(),
-              prazo: cols[2]?.innerText.trim()
-            };
-          });
-        JS
-        evaluate(js, "extract_editais")
-      end
-
-      def click_editais_com_prazo(dias)
-        js = <<~JS
-          (function() {
-            let hoje = new Date();
-            Array.from(document.querySelectorAll("table tr")).forEach(tr => {
-              let prazo = tr.cells[2]?.innerText.trim();
-              if (!prazo) return;
-              let partes = prazo.split("/");
-              if (partes.length === 3) {
-                let data = new Date(partes[2], partes[1]-1, partes[0]);
-                let diff = (data - hoje) / (1000*60*60*24);
-                if (diff <= #{dias}) tr.click();
-              }
-            });
+            var el = document.querySelector("#{selector}");
+            if (el) el.click();
           })();
         JS
         run_async { @browser.execute(js) }
-        @state[:last_action] = "click_editais_com_prazo<=#{dias}"
+        @state[:last_action] = "click:#{selector}"
+      end
+      def type(selector, text)
+        js = <<~JS
+          (function() {
+            var el = document.querySelector("#{selector}");
+            if (el) {
+              el.focus();
+              el.value = "#{escape_js(text)}";
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          })();
+        JS
+        run_async { @browser.execute(js) }
+        @state[:last_action] = "type:#{selector}"
+      end
+      def submit(selector)
+        js = <<~JS
+          (function() {
+            var el = document.querySelector("#{selector}");
+            if (el && el.tagName === 'FORM') el.submit();
+          })();
+        JS
+        run_async { @browser.execute(js) }
+        @state[:last_action] = "submit:#{selector}"
+      end
+      def read_text(selector)
+        evaluate(<<~JS, "read_text:#{selector}")
+          (function() {
+            var el = document.querySelector("#{selector}");
+            return el ? el.innerText : null;
+          })();
+        JS
+      end
+      def read_html(selector)
+        @browser.evaluate(<<~JS, "read_html:#{selector}")
+          (function() {
+            var el = document.querySelector("#{selector}");
+            return el ? el.outerHTML : null;
+          })();
+        JS
+      end
+      def extract_links
+        evaluate(<<~JS, "extract_links")
+          Array.from(document.querySelectorAll('a'))
+            .map(a => ({ text: a.innerText.trim(), href: a.href }));
+        JS
+      end
+      def capture_dom
+        evaluate("document.documentElement.outerHTML", "capture_dom")
+      end
+      def execute_script(js)
+        run_async { @browser.execute(js) }
+      end
+      def evaluate_script(js)
+        @browser.evaluate(js)
+      end
+      def escape_js(str)
+        str.to_s.gsub('"', '\"').gsub("\n", "\\n")
+      end
+      
+
+  # System helpers
+    public 
+      def run_ui(&block)
+        if Display.get_current
+          block.call
+        else
+          @display.async_exec(&block)
+        end
+      end
+    private
+      def run_async(&block)
+        # 🚀 Executa o bloco no display ativo
+        ensure_ui_alive
+        begin
+          @display.async_exec do
+            begin
+              block.call
+            rescue => e
+              puts "[run_async] ⚠️ Erro dentro do bloco: #{e.class} - #{e.message}"
+            end
+          end
+        rescue Java::OrgEclipseSwt::SWTException => e
+          puts "[run_async] 💥 SWTException: #{e.message}"
+          # Se der erro mesmo assim, recria e tenta novamente
+          retry
+        end
+
       end
 
-    end
+      def ensure_ui_alive
+        if @display.nil? || @display.isDisposed
+          puts "[ensure_ui_alive] 🧩 Display inexistente — recriando..."
+          @display = Display.new
+        end
 
-    include ApiAutomacoes
+        if @shell.nil? || @shell.disposed?
+          puts "[ensure_ui_alive] 🧩 Shell inexistente — recriando shell..."
+          recreate_shell_async
+        end
+
+        if @browser.nil? || @browser.isDisposed
+          puts "[ensure_ui_alive] 🧩 Browser inexistente — recriando browser..."
+          run_in_display_thread do
+            @browser = Browser.new(@shell, 0)
+          end
+        end
+      end
+
+      def recreate_shell_async
+        run_in_display_thread do
+          @shell = Shell.new(@display)
+          @shell.setLayout(FillLayout.new)
+          @shell.setText("Agente WebAutomation")
+          @browser = Browser.new(@shell, 0)
+          attach_close_listener
+        end
+      end
+
+      def run_in_display_thread(&block)
+        if Thread.current == @display.thread
+          block.call
+        else
+          @display.sync_exec(&block)
+        end
+      end
+
+      def attach_close_listener
+        listener_class = Class.new do
+          include org.eclipse.swt.widgets.Listener
+
+          def handleEvent(event)
+            event.set_doit(false)
+            event.widget.setVisible(false)
+            puts "[Automation] ✅ Fechamento interceptado — apenas ocultado."
+          end
+        end
+
+        @shell.addListener(SWT::Close, listener_class.new)
+      end
+
+
+      API_PATH = File.expand_path("automations/api.rb", __dir__)
+      def ensure_api_loaded(force_reload: false)
+        return if !force_reload && @last_api_mtime && File.mtime(API_PATH) == @last_api_mtime
+
+        puts "[Loader] ♻️ Recarregando ApiAutomacoes..."
+
+        Object.send(:remove_const, :ApiAutomacoes) if Object.const_defined?(:ApiAutomacoes)
+        load API_PATH
+
+        api_mod = Object.const_get(:ApiAutomacoes)
+        inject_guard_modules_into(api_mod)
+
+        unless self.singleton_class.ancestors.include?(api_mod)
+          self.extend(api_mod)
+          puts "[Loader] ✅ Instância estendida com ApiAutomacoes"
+        end
+
+        @last_api_mtime = File.mtime(API_PATH)
+      end
+
+
+      def inject_guard_modules_into(api_mod)
+        api_mod.module_eval do
+          # === Classe de controle de fluxo personalizada ===
+             unless api_mod.const_defined?(:WebAction)
+                api_mod.const_set(:WebAction, Class.new do
+                attr_reader :result, :done
+
+                def initialize
+                  @done = false
+                  @result = nil
+                  @callbacks = []
+                end
+
+                def resolve(result = nil)
+                  @done = true
+                  @result = result
+                  @callbacks.each { |cb| cb.call(@result) }
+                  self
+                end
+
+                def then(&block)
+                  if @done
+                    next_result = block.call(@result)
+                    return next_result.is_a?(WebAction) ? next_result : WebAction.new.resolve(next_result)
+                  end
+
+                  promise = WebAction.new
+                  @callbacks << lambda do |res|
+                    next_result = block.call(res)
+                    if next_result.is_a?(WebAction)
+                      next_result.then { |r| promise.resolve(r) }
+                    else
+                      promise.resolve(next_result)
+                    end
+                  end
+                  promise
+                end
+
+                def wait(timeout: 30)
+                  start = Time.now
+                  until @done || (Time.now - start) > timeout
+                    sleep 0.05
+                  end
+                  @result
+                end
+
+                alias_method :wait_load, :wait
+              end)
+            end
+          # === Guardas fundamentais ===
+
+            def guard_exec(descricao, &block)
+              puts "[Guard] ▶️ #{descricao}"
+              begin
+                result = instance_eval(&block)
+                puts "[Guard] ✅ Sucesso: #{descricao}"
+                @last_result = result
+              rescue => e
+                puts "[Guard] 💥 Erro em '#{descricao}': #{e.class} - #{e.message}"
+                @last_result = nil
+              end
+            end
+
+            def guard_wait(segundos)
+              puts "[Guard] ⏱️ Aguardando #{segundos}s..."
+              sleep(segundos)
+            end
+
+            def guard_condition(descricao, &block)
+              cond = block.call(@last_result)
+              puts "[Guard] ⚙️ Condição '#{descricao}' → #{cond.inspect}"
+              cond ? @last_result : nil
+            end
+
+          # === Estrutura sequencial ===
+
+            def sequence(&block)
+              puts "[Sequence] 🚀 Iniciando sequência..."
+              @last_result = nil
+              instance_eval(&block)
+              puts "[Sequence] 🏁 Finalizado com resultado: #{@last_result.inspect}"
+              @last_result
+            end
+        end
+      end
+
+
 
     public
-    def setup_llm
+      def setup_llm
+
+        return @chat if defined?(@chat) && @chat
+
+        RubyLLM.configure do |config|
+          config.openai_api_key = 'none'
+          config.openai_api_base = "http://127.0.0.1:#{SERVER_PORT}/v1"
+        end
+
+        @chat = RubyLLM.chat(
+          model: MODEL_IDENTIFIER,
+          provider: :openai,
+          assume_model_exists: true
+        )
+
+        @chat.with_instructions <<~SYS
+            Você é um agente de automação Ruby especializado em controle de navegador e execução de tarefas de escritório.
+            Seu objetivo é **gerar código Ruby funcional**, usando as funções do módulo `ApiAutomacoes`.
+
+            ### 🧩 Estrutura e sintaxe permitida
+
+            - Use **chamadas diretas de método** (sem `Agents.` nem `@automation.`).
+            - Você pode combinar ações usando:
+              - `sequence do ... end` para criar fluxos de execução lineares.
+              - `guard_exec("descrição") { ... }` para cada etapa.
+              - `guard_wait(segundos)` para pausas.
+            
+
+            
+
+            ### 🧠 Estratégia de geração
+
+            - Prefira `sequence` com `guard_exec` e `.wait_load` para fluxos claros e previsíveis.
+            - Use `.then` apenas se a instrução for naturalmente encadeada ("após abrir, digite...").
+            - Sempre use URLs completas e parâmetros explícitos.
+            - Produza **apenas código Ruby funcional**, sem explicações nem comentários.
+
+            ### Exemplo de comportamento esperado
+
+            Entrada: *"abrir o Google e procurar por notebooks"*
+             Saída:
+              ```ruby
+              sequence do
+                guard_exec("abrir google") { open_url(url: "https://google.com") }
+                guard_exec("buscar notebooks") { type("input[name='q']", "notebooks") }
+                guard_exec("submeter busca") { submit("form") }
+              end
+              ```
+
+        SYS
 
 
+        @chat.with_temperature(0.0)
 
-      return @chat if defined?(@chat) && @chat
 
-      RubyLLM.configure do |config|
-        config.openai_api_key = 'none'
-        config.openai_api_base = "http://127.0.0.1:#{SERVER_PORT}/v1"
+        @chat
       end
 
-      @chat = RubyLLM.chat(
-        model: MODEL_IDENTIFIER,
-        provider: :openai,
+      def funcoes_disponiveis
+        ensure_api_loaded(force_reload: false)
+        api_methods = ApiAutomacoes.instance_methods(false)
 
-        assume_model_exists: true
-      )
-
-      @chat.with_instructions <<~SYS
-        Você é um agente de automação integrado ao módulo Ruby `Agents`.
-        Seu papel é converter comandos em linguagem natural em chamadas Ruby diretas,
-        usando os métodos disponíveis listados pelo sistema.
-
-        ⚙️ Regras:
-        - Retorne apenas **uma linha Ruby válida**, sem explicações.
-        - Nunca invente métodos que não estão na lista.
-        - Use parâmetros coerentes com os nomes e tipos indicados.
-        - Prefira aspas duplas em strings.
-        - Se não for possível mapear, retorne `nil`.
-
-        Exemplo:
-        Entrada: "mande mensagem para Maria dizendo oi"
-        Saída: `Agents.whatsapp_enviar(contato: "Maria", mensagem: "oi")`
-      SYS
-
-      @chat.with_temperature(0.0)
-
-
-      @chat
-    end
-
-
-    def funcoes_disponiveis
-      # lista apenas os métodos definidos DIRETAMENTE no módulo
-      api_methods = ApiAutomacoes.instance_methods(false)
-
-      api_methods.map do |m|
-        um = ApiAutomacoes.instance_method(m)
-        # parameters: [[:keyreq, :contato], [:key, :visible], ...]
-        args = um.parameters.map do |kind, name|
-          # documenta como keyword (ex.: :contato, :visible)
-          name
-        end.compact
-        { nome: m.to_s, args: args }
-      end
-    end
-
-    # ===========================================================
-    # 🧠 Interpreta e retorna uma linha Ruby direta
-    # ===========================================================
-    def interpretar(input_text)
-      setup_llm
-
-      lista_funcoes = funcoes_disponiveis.map do |f|
-        args_sig = f[:args].map { |a| "#{a}:" }.join(", ")
-        # instruímos o modelo a responder com Agents.<nome>(...)
-        "Agents.#{f[:nome]}(#{args_sig})"
-      end.join("\n")
-
-      prompt = <<~PROMPT
-        Comando do usuário:
-        "#{input_text}"
-    
-        Métodos disponíveis (chame EXATAMENTE como abaixo):
-        #{lista_funcoes}
-    
-        Gere apenas UMA linha Ruby chamando um dos métodos acima.
-      PROMPT
-
-      result = ""
-      setup_llm.ask(prompt) { |chunk| result << chunk.content.to_s }
-
-      # extrai a linha Agents.xxx(...)
-      result.strip[/`?(Agents\..*?)`?$/m, 1]
-    end
-
-    # ===========================================================
-    # 🚀 Executa o comando diretamente
-    # ===========================================================
-    def executar(input_text)
-      code_line = interpretar(input_text)
-
-      if code_line.nil? || code_line.strip.empty?
-        puts "[Interpreter] ❌ Nenhum comando interpretado."
-        return nil
+        api_methods.map do |m|
+          um = ApiAutomacoes.instance_method(m)
+          args = um.parameters.map { |_, name| name }.compact
+          { nome: m.to_s, args: args }
+        end
       end
 
-      puts "[Interpreter] Interpretação: #{code_line}"
 
-      if code_line =~ /Agents\.(\w+)\s*\((.*)\)\s*$/
-        metodo = Regexp.last_match(1)
-        args_str = Regexp.last_match(2)
-        args = parse_args(args_str) || {}
+      # ===========================================================
+      # 🧠 Interpreta e retorna uma linha Ruby direta
+      # ===========================================================
+      def interpretar(input_text)
+        setup_llm
 
-        unless ApiAutomacoes.instance_methods(false).map(&:to_s).include?(metodo)
-          puts "[Interpreter] ⚠️ Método '#{metodo}' não faz parte da ApiAutomacoes."
+        lista_funcoes = funcoes_disponiveis.map do |f|
+          args_sig = f[:args].map { |a| "#{a}:" }.join(", ")
+          "#{f[:nome]}(#{args_sig})"
+        end.join("\n")
+
+        prompt = <<~PROMPT
+          Converta o pedido do usuário em uma **expressão Ruby funcional**, composta por chamadas
+          diretas aos métodos disponíveis.
+
+          Métodos disponíveis:
+          #{lista_funcoes}
+
+          Regras:
+          - Gere uma **expressão Ruby válida**, usando apenas chamadas de método locais (sem prefixo).
+          - As chamadas podem ser aninhadas ou em sequência (`;`).
+          - Não use `Agents.` ou `@automation.`.
+          - Nenhuma explicação ou comentário, apenas o código Ruby.
+
+          Entrada: "#{input_text}"
+        PROMPT
+
+        result = ""
+        setup_llm.ask(prompt) { |chunk| result << chunk.content.to_s }
+
+        result.strip.gsub(/^```ruby|```$/, "").strip
+      end
+
+      # ===========================================================
+      # 🚀 Executa o comando diretamente
+      # ===========================================================
+      def executar(input_text)
+        ensure_api_loaded
+        code_line = interpretar(input_text)
+
+        if code_line.nil? || code_line.strip.empty?
+          puts "[Interpreter] ❌ Nenhum comando interpretado."
           return nil
         end
 
-        puts "[Interpreter] Chamando ApiAutomacoes##{metodo} com #{args.inspect}"
+        # 🧠 injeta o self no sequence
+        code_line = code_line.gsub(/RailsExec\.sequence\s*do/, "RailsExec.sequence(self) do")
+
+        puts "[Interpreter] 💬 Interpretação limpa: #{code_line}"
 
         begin
-          method_ref = ApiAutomacoes.instance_method(metodo)
-          params = method_ref.parameters
-          puts "[Interpreter] Parâmetros esperados: #{params.inspect}"
-
-          bound_method = method_ref.bind(self)
-
-          if params.empty? || args.empty?
-            puts "➡️ executando #{metodo} sem argumentos"
-            result = bound_method.call
-          elsif params.any? { |t, _| [:key, :keyreq, :keyrest].include?(t) }
-            puts "➡️ executando #{metodo} com keyword args"
-            result = bound_method.call(**args)
-          else
-            puts "➡️ executando #{metodo} com posicionais"
-            result = bound_method.call(*args.values)
-          end
-
-          puts "[Interpreter] ✅ #{metodo} executado com sucesso."
+          result = instance_eval(code_line)
+          puts "[Interpreter] ✅ Execução concluída → #{result.inspect}"
           result
-
-        rescue ArgumentError => e
-          if e.message =~ /given 1, expected 0/
-            puts "[Interpreter] ⚙️ Corrigindo execução para aceitar argumento fantasma..."
-            begin
-              result = ApiAutomacoes.instance_method(metodo).bind(self).call(nil)
-              puts "[Interpreter] ✅ Reexecutado com argumento vazio."
-              return result
-            rescue => e2
-              puts "[Interpreter] ❌ Falha final: #{e2.class} - #{e2.message}"
-            end
-          else
-            puts "[Interpreter] ⚠️ ArgumentError: #{e.message}"
-          end
-          nil
-
         rescue => e
-          puts "[Interpreter] 💥 Erro em '#{metodo}': #{e.class} - #{e.message}"
-          puts e.backtrace.first(5).join("\n")
+          puts "[Interpreter] 💥 Erro ao executar expressão:\n   #{e.class} - #{e.message}"
           nil
         end
-
-      else
-        puts "[Interpreter] ⚠️ Linha Ruby não reconhecida: #{code_line.inspect}"
-        nil
-      end
-    end
-
-    def parse_args(str)
-      args = {}
-      return args if str.nil? || str.strip.empty?
-
-      # keywords com string: key: "value"
-      str.scan(/(\w+):\s*"([^"]*)"/).each do |k, v|
-        args[k.to_sym] = v
       end
 
-      # keywords com numérico (ex.: dias: 7)
-      str.scan(/(\w+):\s*(\d+)\b/).each do |k, v|
-        args[k.to_sym] = v.to_i
+
+
+      def parse_args(str)
+        args = {}
+        return args if str.nil? || str.strip.empty?
+
+        # keywords com string: key: "value"
+        str.scan(/(\w+):\s*"([^"]*)"/).each do |k, v|
+          args[k.to_sym] = v
+        end
+
+        # keywords com numérico (ex.: dias: 7)
+        str.scan(/(\w+):\s*(\d+)\b/).each do |k, v|
+          args[k.to_sym] = v.to_i
+        end
+
+        args
       end
 
-      args
-    end
-
-  end
+  
+  
+  end#Class end
 
 end
 

@@ -195,7 +195,7 @@ class AgentsChatDemo < Component
 
               # Processamento assíncrono via automação
               @automation.send(:run_async) do
-                @automation.executar(comando)
+                puts @automation.executar(comando)
               end
             },
                    style: "margin-left:10px; background:#007acc; color:white; border:none; border-radius:6px; padding:10px 15px; cursor:pointer;"
