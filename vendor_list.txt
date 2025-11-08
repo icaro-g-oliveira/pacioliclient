@@ -1,0 +1,10 @@
+    Diretório: C:\Users\DEV\Desktop\pacioliclient\vendor
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+d-----        30/09/2025     10:52                .lmstudio
+d-----        06/10/2025     03:43                llama.cpp-win-x86_64-avx2-1.50.2
+d-----        18/09/2025     04:15                LM Studio
+d-----        18/09/2025     21:40                nodejs
+-a----        19/07/2025     03:20     4237063328 gemma-3n-E4B-it-Q4_K_M.gguf
